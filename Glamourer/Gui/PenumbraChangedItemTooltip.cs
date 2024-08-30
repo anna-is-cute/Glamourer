@@ -1,15 +1,19 @@
-﻿using Glamourer.Designs;
+﻿using FFXIVClientStructs.FFXIV.Client.UI.Agent;
+using Glamourer.Designs;
 using Glamourer.Events;
-using Glamourer.Interop;
 using Glamourer.Interop.Penumbra;
+using Glamourer.Interop.Structs;
 using Glamourer.Services;
 using Glamourer.State;
 using ImGuiNET;
 using OtterGui.Raii;
 using Penumbra.Api.Enums;
+using Penumbra.GameData.Actors;
 using Penumbra.GameData.Data;
 using Penumbra.GameData.Enums;
+using Penumbra.GameData.Interop;
 using Penumbra.GameData.Structs;
+using ObjectManager = Glamourer.Interop.ObjectManager;
 
 namespace Glamourer.Gui;
 
@@ -21,6 +25,7 @@ public sealed class PenumbraChangedItemTooltip : IDisposable
     private readonly ObjectManager    _objects;
     private readonly CustomizeService _customize;
     private readonly GPoseService     _gpose;
+    private readonly ActorManager     _actors;
 
     private readonly EquipItem[] _lastItems = new EquipItem[EquipFlagExtensions.NumEquipFlags / 2];
 
@@ -32,7 +37,7 @@ public sealed class PenumbraChangedItemTooltip : IDisposable
     public DateTime LastClick   { get; private set; } = DateTime.MinValue;
 
     public PenumbraChangedItemTooltip(PenumbraService penumbra, StateManager stateManager, ItemManager items, ObjectManager objects,
-        CustomizeService customize, GPoseService gpose)
+        CustomizeService customize, GPoseService gpose, ActorManager actors)
     {
         _penumbra         =  penumbra;
         _stateManager     =  stateManager;
@@ -40,6 +45,7 @@ public sealed class PenumbraChangedItemTooltip : IDisposable
         _objects          =  objects;
         _customize        =  customize;
         _gpose            =  gpose;
+        _actors           =  actors;
         _penumbra.Tooltip += OnPenumbraTooltip;
         _penumbra.Click   += OnPenumbraClick;
     }
@@ -59,6 +65,20 @@ public sealed class PenumbraChangedItemTooltip : IDisposable
         if (!data.Valid || !_stateManager.GetOrCreate(identifier, data.Objects[0], out player))
         {
             player = null;
+            return false;
+        }
+
+        return true;
+    }
+
+    public unsafe bool TryOn([NotNullWhen(true)] out ActorState? tryOn)
+    {
+        var actor = (Actor) (nint) AgentTryon.Instance()->CharaView.GetCharacter();
+        var ident = actor.GetIdentifier(_actors);
+        var data  = new ActorData(actor, "tryon");
+        if (!_stateManager.GetOrCreate(ident, data.Objects[0], out tryOn))
+        {
+            tryOn = null;
             return false;
         }
 
@@ -202,10 +222,21 @@ public sealed class PenumbraChangedItemTooltip : IDisposable
     private void OnPenumbraClick(MouseButton button, ChangedItemType type, uint id)
     {
         LastClick = DateTime.UtcNow;
-        if (button is not MouseButton.Right)
+
+        var tryOn = button == MouseButton.Middle;
+        if (button != MouseButton.Right && !tryOn)
             return;
 
-        if (!Player(out var state))
+        unsafe
+        {
+            if (tryOn && !AgentTryon.Instance()->IsAddonReady())
+                AgentTryon.Instance()->Show();
+        }
+
+        var success = tryOn
+            ? TryOn(out var state)
+            : Player(out state);
+        if (!success)
             return;
 
         switch (type)
@@ -215,11 +246,15 @@ public sealed class PenumbraChangedItemTooltip : IDisposable
                 if (!_items.ItemData.TryGetValue(id, type is ChangedItemType.Item ? EquipSlot.MainHand : EquipSlot.OffHand, out var item))
                     return;
 
-                ApplyItem(state, item);
+                if (tryOn)
+                    AgentTryon.TryOn(0, item.ItemId.Id);
+                else
+                    ApplyItem(state!, item);
+
                 return;
             case ChangedItemType.Customization:
                 var (race, gender, index, value) = IdentifiedCustomization.Split(id);
-                var customize = state.ModelData.Customize;
+                var customize = state!.ModelData.Customize;
                 if (CheckGenderRace(customize, race, gender) && VerifyValue(customize, index, value))
                     _stateManager.ChangeCustomize(state, index, value, ApplySettings.Manual);
                 return;
